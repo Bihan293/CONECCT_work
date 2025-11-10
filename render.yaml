@@ -1,0 +1,13 @@
+services:
+  - type: web
+    name: conect-work-bot
+    env: docker
+    plan: free
+    dockerfilePath: Dockerfile
+    envVars:
+      - key: TELEGRAM_BOT_TOKEN
+        value: "${TELEGRAM_BOT_TOKEN}"
+      - key: WEBHOOK_SECRET
+        value: "${WEBHOOK_SECRET}"
+      - key: DATABASE_URL
+        value: "${DATABASE_URL}"
