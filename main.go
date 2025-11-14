@@ -27,8 +27,7 @@ func main() {
 	// attempt to set webhook if WEBHOOK_URL set
 	if cfg.WebhookURL != "" && cfg.WebhookSecret != "" {
 		wh := cfg.WebhookURL + "/webhook/" + cfg.WebhookSecret
-		_, err := bot.api.Request(bot.api.NewWebhook(wh))
-		if err != nil {
+		if err := bot.SetWebhook(wh); err != nil {
 			log.Printf("setWebhook warning: %v", err)
 		} else {
 			log.Printf("webhook set to %s", wh)
