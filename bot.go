@@ -9,6 +9,7 @@ type Bot struct {
 	api *tgbot.BotAPI
 }
 
+// InitBot инициализирует бота с токеном
 func InitBot(token string) *Bot {
 	if token == "" {
 		log.Fatal("TELEGRAM_BOT_TOKEN is required")
@@ -21,10 +22,12 @@ func InitBot(token string) *Bot {
 	return &Bot{api: api}
 }
 
+// Shutdown пока пустой, оставлен для будущего расширения
 func (b *Bot) Shutdown() {
 	// nothing for now
 }
 
+// Send отправляет любое сообщение в Telegram
 func (b *Bot) Send(msg tgbot.Chattable) {
 	_, err := b.api.Send(msg)
 	if err != nil {
@@ -32,8 +35,12 @@ func (b *Bot) Send(msg tgbot.Chattable) {
 	}
 }
 
+// SetWebhook устанавливает вебхук для бота
 func (b *Bot) SetWebhook(url string) error {
-	webhookConfig := tgbot.NewWebhook(url)
-	_, err := b.api.Request(webhookConfig)
+	webhookConfig, err := tgbot.NewWebhook(url)
+	if err != nil {
+		return err
+	}
+	_, err = b.api.Request(webhookConfig)
 	return err
 }
