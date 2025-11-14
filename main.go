@@ -1,10 +1,8 @@
 package main
 
 import (
-	"context"
 	"log"
 	"net/http"
-	"os"
 	"time"
 )
 
@@ -29,19 +27,22 @@ func main() {
 	// attempt to set webhook if WEBHOOK_URL set
 	if cfg.WebhookURL != "" && cfg.WebhookSecret != "" {
 		wh := cfg.WebhookURL + "/webhook/" + cfg.WebhookSecret
-		if err := bot.SetWebhook(wh); err != nil {
+		_, err := bot.api.Request(bot.api.NewWebhook(wh))
+		if err != nil {
 			log.Printf("setWebhook warning: %v", err)
 		} else {
 			log.Printf("webhook set to %s", wh)
 		}
 	}
 
+	// HTTP Handlers
 	http.HandleFunc("/webhook/"+cfg.WebhookSecret, makeWebhookHandler(bot))
 	http.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(200)
 		w.Write([]byte("ok"))
 	})
 
+	// Server config
 	port := cfg.Port
 	if port == "" {
 		port = "8080"
@@ -52,6 +53,7 @@ func main() {
 		WriteTimeout: 15 * time.Second,
 		IdleTimeout:  60 * time.Second,
 	}
+
 	log.Printf("listening on :%s", port)
 	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		log.Fatalf("server error: %v", err)
