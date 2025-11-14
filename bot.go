@@ -33,6 +33,7 @@ func (b *Bot) Send(msg tgbot.Chattable) {
 }
 
 func (b *Bot) SetWebhook(url string) error {
-	_, err := b.api.Request(tgbot.Request{Method: "setWebhook", Params: map[string]interface{}{"url": url}})
+	webhookConfig := tgbot.NewWebhook(url)
+	_, err := b.api.Request(webhookConfig)
 	return err
 }
