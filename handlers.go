@@ -28,7 +28,6 @@ func makeWebhookHandler(b *Bot) http.HandlerFunc {
 			w.WriteHeader(400)
 			return
 		}
-		// quick ack
 		go processUpdate(b, &upd)
 		w.WriteHeader(200)
 	}
@@ -70,13 +69,12 @@ func handleMessage(b *Bot, msg *tgbot.Message) {
 		return
 	}
 
-	// check if user is in a flow (executor creating profile or client writing order)
+	// check if user is in a flow
 	inFlight.mu.Lock()
 	state := inFlight.m[uid]
 	inFlight.mu.Unlock()
 
 	if state == "creating_profile" {
-		// enforce 150-200 symbols
 		txt := strings.TrimSpace(msg.Text)
 		if len([]rune(txt)) < 150 || len([]rune(txt)) > 200 {
 			sendText(b, chatID, "Описание должно быть от 150 до 200 символов. Попробуйте снова.")
@@ -104,7 +102,6 @@ func handleMessage(b *Bot, msg *tgbot.Message) {
 	}
 
 	if strings.HasPrefix(state, "creating_order:") {
-		// state: creating_order:<category>
 		parts := strings.Split(state, ":")
 		cat := parts[1]
 		txt := strings.TrimSpace(msg.Text)
@@ -130,7 +127,6 @@ func handleMessage(b *Bot, msg *tgbot.Message) {
 			inFlight.mu.Unlock()
 			return
 		}
-		// send to group
 		sendOrderToGroup(b, id, ord)
 		inFlight.mu.Lock()
 		delete(inFlight.m, uid)
@@ -139,7 +135,6 @@ func handleMessage(b *Bot, msg *tgbot.Message) {
 		return
 	}
 
-	// default fallback
 	sendText(b, chatID, "Нажмите /start чтобы начать.")
 }
 
@@ -152,7 +147,6 @@ func handleCallback(b *Bot, q *tgbot.CallbackQuery) {
 	b.api.Request(tgbot.NewCallback(q.ID, ""))
 
 	if data == "role:executor" {
-		// start profile creation flow
 		inFlight.mu.Lock()
 		inFlight.m[uid] = "creating_profile"
 		inFlight.mu.Unlock()
@@ -160,7 +154,6 @@ func handleCallback(b *Bot, q *tgbot.CallbackQuery) {
 		return
 	}
 	if data == "role:client" {
-		// send categories
 		msg := tgbot.NewMessage(chatID, "Выберите нишу:")
 		msg.ReplyMarkup = categoriesKeyboard()
 		b.Send(msg)
@@ -168,7 +161,6 @@ func handleCallback(b *Bot, q *tgbot.CallbackQuery) {
 	}
 	if strings.HasPrefix(data, "cat:") {
 		cat := strings.Split(data, ":")[1]
-		// mark state
 		inFlight.mu.Lock()
 		inFlight.m[uid] = "creating_order:" + cat
 		inFlight.mu.Unlock()
@@ -184,7 +176,6 @@ func handleCallback(b *Bot, q *tgbot.CallbackQuery) {
 	if strings.HasPrefix(data, "order:complain:") {
 		idstr := strings.Split(data, ":")[2]
 		id, _ := strconv.ParseInt(idstr, 10, 64)
-		// ask for confirmation
 		btn := tgbot.NewInlineKeyboardMarkup(tgbot.NewInlineKeyboardRow(
 			tgbot.NewInlineKeyboardButtonData("Да, пожаловаться", fmt.Sprintf("complain:confirm:%d", id)),
 			tgbot.NewInlineKeyboardButtonData("Отмена", "complain:cancel"),
@@ -203,16 +194,13 @@ func handleCallback(b *Bot, q *tgbot.CallbackQuery) {
 			return
 		}
 		sendText(b, int64(uid), "Жалоба принята. Количество жалоб: "+strconv.Itoa(c))
-		// if >=10 delete order
 		if c >= 10 {
 			od, _ := storage.GetOrderByID(id)
 			if od != nil {
 				_ = storage.DeleteOrderByID(id)
-				// notify creator
 				sendText(b, od.CreatorID, "Ваша анкета была удалена из-за 10 жалоб.")
 			}
 		} else if c >= 7 {
-			// warn author (example threshold)
 			od, _ := storage.GetOrderByID(id)
 			if od != nil {
 				sendText(b, od.CreatorID, fmt.Sprintf("Ваша анкета получила %d жалоб. Если жалоб станет 10 — она будет удалена.", c))
@@ -268,10 +256,8 @@ func sendOrderToGroup(b *Bot, orderID int64, ord Order) {
 	}
 	txt := fmt.Sprintf("Новая анкета (id %d)\nКатегория: %s\nТекст: %s\nОт: %d", orderID, ord.Category, ord.Text, ord.CreatorID)
 	msg := tgbot.NewMessage(gid, txt)
-	// attach buttons
 	msg.ReplyMarkup = orderButtonsInline(orderID)
 	b.Send(msg)
-	// store group message id is optional (not implemented for JSON)
 }
 
 func orderButtonsInline(id int64) tgbot.InlineKeyboardMarkup {
@@ -286,14 +272,10 @@ func handleConnect(b *Bot, connectorID int64, orderID int64) {
 		sendText(b, int64(connectorID), "Анкета не найдена.")
 		return
 	}
-	// send notification to creator
 	sendText(b, od.CreatorID, fmt.Sprintf("Ваша анкета принята пользователем %d", connectorID))
-	// if connector has profile — send it to creator
 	if prof, err := storage.GetProfile(connectorID); err == nil && prof != nil {
 		sendProfileToChat(b, od.CreatorID, *prof)
 	}
-	// delete order
 	_ = storage.DeleteOrderByID(orderID)
-	// confirm connector
 	sendText(b, int64(connectorID), "Вы успешно сконнектились с автором анкеты.")
 }
