@@ -4,26 +4,28 @@ RUN apk add --no-cache git
 
 WORKDIR /src
 
-# 1. Копируем go.mod И go.sum (даже если go.sum пустой)
-COPY go.mod go.sum ./
+# Копируем только go.mod (go.sum нет в репозитории)
+COPY go.mod ./
 
-# 2. Копируем весь код проекта (раньше!)
+# Копируем весь код проекта
 COPY . .
 
-# 3. Теперь tidy увидит все импорты
+# Генерируем go.sum и подтягиваем модули
 RUN go mod tidy
 RUN go mod download
 
-# 4. Сборка
+# Сборка
 RUN CGO_ENABLED=0 GOOS=linux go build -o /bin/conectwork ./
 
 # -------------------------
-# Minimal runtime image
+# Минимальный образ запуска
 # -------------------------
 
 FROM alpine:3.18
 RUN apk add --no-cache ca-certificates
+
 COPY --from=build /bin/conectwork /bin/conectwork
+
 USER 1000:1000
 ENV PORT=8080
 EXPOSE 8080
