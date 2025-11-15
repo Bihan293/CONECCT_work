@@ -8,16 +8,64 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	tgbot "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 )
 
+// ------------------------ Worker pool ------------------------
+var updatesChan = make(chan *tgbot.Update, 100) // буфер для апдейтов
+var messagesChan = make(chan tgbot.Chattable, 100) // канал для сообщений
+
+func startWorkers(b *Bot, updateWorkers int, msgWorkers int) {
+	// воркеры для апдейтов
+	for i := 0; i < updateWorkers; i++ {
+		go func() {
+			for upd := range updatesChan {
+				processUpdate(b, upd)
+			}
+		}()
+	}
+
+	// воркеры для отправки сообщений
+	for i := 0; i < msgWorkers; i++ {
+		go func() {
+			for msg := range messagesChan {
+				b.Send(msg)
+			}
+		}()
+	}
+}
+
+// ------------------------ InFlight ------------------------
+type userState struct {
+	state string
+	ts    time.Time
+}
+
 var inFlight = struct {
 	mu sync.Mutex
-	m  map[int64]string
-}{m: map[int64]string{}}
+	m  map[int64]userState
+}{m: map[int64]userState{}}
 
-// webhook handler factory
+// периодическая чистка старых состояний
+func startInFlightCleaner() {
+	go func() {
+		for {
+			time.Sleep(5 * time.Minute)
+			inFlight.mu.Lock()
+			now := time.Now()
+			for uid, s := range inFlight.m {
+				if now.Sub(s.ts) > 15*time.Minute {
+					delete(inFlight.m, uid)
+				}
+			}
+			inFlight.mu.Unlock()
+		}
+	}()
+}
+
+// ------------------------ Webhook ------------------------
 func makeWebhookHandler(b *Bot) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		defer r.Body.Close()
@@ -27,7 +75,7 @@ func makeWebhookHandler(b *Bot) http.HandlerFunc {
 			w.WriteHeader(400)
 			return
 		}
-		go processUpdate(b, &upd)
+		updatesChan <- &upd
 		w.WriteHeader(200)
 	}
 }
@@ -40,6 +88,30 @@ func processUpdate(b *Bot, upd *tgbot.Update) {
 	}
 }
 
+// ------------------------ Message sending ------------------------
+func sendMessage(msg tgbot.Chattable) {
+	messagesChan <- msg
+}
+
+func sendText(b *Bot, chatID int64, text string) {
+	sendMessage(tgbot.NewMessage(chatID, text))
+}
+
+func sendStart(b *Bot, chatID int64) {
+	msg := tgbot.NewMessage(chatID, "Кто вы? Выберите роль:")
+	msg.ReplyMarkup = startKeyboard()
+	sendMessage(msg)
+}
+
+func sendProfileToChat(b *Bot, chatID int64, p Profile) {
+	txt := fmt.Sprintf("Профиль @%s\n\n%s", p.Username, p.Description)
+	sendText(b, chatID, txt)
+	if p.PhotoFileID != "" {
+		sendMessage(tgbot.NewPhoto(chatID, tgbot.FileID(p.PhotoFileID)))
+	}
+}
+
+// ------------------------ Message handlers ------------------------
 func handleMessage(b *Bot, msg *tgbot.Message) {
 	chatID := msg.Chat.ID
 	uid := msg.From.ID
@@ -68,10 +140,15 @@ func handleMessage(b *Bot, msg *tgbot.Message) {
 		return
 	}
 
-	// check if user is in a flow
+	// check inFlight
 	inFlight.mu.Lock()
-	state := inFlight.m[uid]
+	stateObj, ok := inFlight.m[uid]
 	inFlight.mu.Unlock()
+
+	state := ""
+	if ok {
+		state = stateObj.state
+	}
 
 	if state == "creating_profile" {
 		txt := strings.TrimSpace(msg.Text)
@@ -80,7 +157,7 @@ func handleMessage(b *Bot, msg *tgbot.Message) {
 			return
 		}
 		var photoFileID string
-		if msg.Photo != nil && len(msg.Photo) > 0 {
+		if len(msg.Photo) > 0 {
 			photoFileID = msg.Photo[len(msg.Photo)-1].FileID
 		}
 		prof := Profile{
@@ -109,7 +186,7 @@ func handleMessage(b *Bot, msg *tgbot.Message) {
 			return
 		}
 		var photoFileID string
-		if msg.Photo != nil && len(msg.Photo) > 0 {
+		if len(msg.Photo) > 0 {
 			photoFileID = msg.Photo[len(msg.Photo)-1].FileID
 		}
 		ord := Order{
@@ -137,42 +214,35 @@ func handleMessage(b *Bot, msg *tgbot.Message) {
 	sendText(b, chatID, "Нажмите /start чтобы начать.")
 }
 
+// ------------------------ Callbacks ------------------------
 func handleCallback(b *Bot, q *tgbot.CallbackQuery) {
 	data := q.Data
 	uid := q.From.ID
 	chatID := q.Message.Chat.ID
 
-	// acknowledge
-	b.api.Request(tgbot.NewCallback(q.ID, ""))
+	b.api.Request(tgbot.NewCallback(q.ID, "")) // acknowledge
 
-	if data == "role:executor" {
+	switch {
+	case data == "role:executor":
 		inFlight.mu.Lock()
-		inFlight.m[uid] = "creating_profile"
+		inFlight.m[uid] = userState{"creating_profile", time.Now()}
 		inFlight.mu.Unlock()
 		sendText(b, int64(uid), "Пришлите описание профиля (150-200 символов). Можно отправить фото вместе с описанием.")
-		return
-	}
-	if data == "role:client" {
+	case data == "role:client":
 		msg := tgbot.NewMessage(chatID, "Выберите нишу:")
 		msg.ReplyMarkup = categoriesKeyboard()
-		b.Send(msg)
-		return
-	}
-	if strings.HasPrefix(data, "cat:") {
+		sendMessage(msg)
+	case strings.HasPrefix(data, "cat:"):
 		cat := strings.Split(data, ":")[1]
 		inFlight.mu.Lock()
-		inFlight.m[uid] = "creating_order:" + cat
+		inFlight.m[uid] = userState{"creating_order:" + cat, time.Now()}
 		inFlight.mu.Unlock()
 		sendText(b, int64(uid), "Опишите задачу и (опционально) прикрепите фото. Пример: Хочу сайт-визитку, бюджет 20000.")
-		return
-	}
-	if strings.HasPrefix(data, "order:connect:") {
+	case strings.HasPrefix(data, "order:connect:"):
 		idstr := strings.Split(data, ":")[2]
 		id, _ := strconv.ParseInt(idstr, 10, 64)
 		handleConnect(b, uid, id)
-		return
-	}
-	if strings.HasPrefix(data, "order:complain:") {
+	case strings.HasPrefix(data, "order:complain:"):
 		idstr := strings.Split(data, ":")[2]
 		id, _ := strconv.ParseInt(idstr, 10, 64)
 		btn := tgbot.NewInlineKeyboardMarkup(tgbot.NewInlineKeyboardRow(
@@ -181,10 +251,8 @@ func handleCallback(b *Bot, q *tgbot.CallbackQuery) {
 		))
 		msg := tgbot.NewMessage(chatID, "Вы уверены, что хотите отправить жалобу на эту анкету?")
 		msg.ReplyMarkup = btn
-		b.Send(msg)
-		return
-	}
-	if strings.HasPrefix(data, "complain:confirm:") {
+		sendMessage(msg)
+	case strings.HasPrefix(data, "complain:confirm:"):
 		idstr := strings.Split(data, ":")[2]
 		id, _ := strconv.ParseInt(idstr, 10, 64)
 		c, err := storage.IncrementComplaint(id, uid)
@@ -194,46 +262,21 @@ func handleCallback(b *Bot, q *tgbot.CallbackQuery) {
 		}
 		sendText(b, int64(uid), "Жалоба принята. Количество жалоб: "+strconv.Itoa(c))
 		if c >= 10 {
-			od, _ := storage.GetOrderByID(id)
-			if od != nil {
+			if od, _ := storage.GetOrderByID(id); od != nil {
 				_ = storage.DeleteOrderByID(id)
 				sendText(b, od.CreatorID, "Ваша анкета была удалена из-за 10 жалоб.")
 			}
 		} else if c >= 7 {
-			od, _ := storage.GetOrderByID(id)
-			if od != nil {
+			if od, _ := storage.GetOrderByID(id); od != nil {
 				sendText(b, od.CreatorID, fmt.Sprintf("Ваша анкета получила %d жалоб. Если жалоб станет 10 — она будет удалена.", c))
 			}
 		}
-		return
-	}
-	if data == "complain:cancel" {
+	case data == "complain:cancel":
 		sendText(b, int64(uid), "Жалоба отменена.")
-		return
 	}
 }
 
-func sendText(b *Bot, chatID int64, text string) {
-	msg := tgbot.NewMessage(chatID, text)
-	b.Send(msg)
-}
-
-func sendStart(b *Bot, chatID int64) {
-	msg := tgbot.NewMessage(chatID, "Кто вы? Выберите роль:")
-	msg.ReplyMarkup = startKeyboard()
-	b.Send(msg)
-}
-
-func sendProfileToChat(b *Bot, chatID int64, p Profile) {
-	txt := fmt.Sprintf("Профиль @%s\n\n%s", p.Username, p.Description)
-	msg := tgbot.NewMessage(chatID, txt)
-	b.Send(msg)
-	if p.PhotoFileID != "" {
-		ph := tgbot.NewPhoto(chatID, tgbot.FileID(p.PhotoFileID))
-		b.Send(ph)
-	}
-}
-
+// ------------------------ Orders ------------------------
 func deleteOrderByCreator(userID int64) error {
 	od, err := storage.GetOrderByCreator(userID)
 	if err != nil {
@@ -243,7 +286,7 @@ func deleteOrderByCreator(userID int64) error {
 }
 
 func sendOrderToGroup(b *Bot, orderID int64, ord Order) {
-	cfg := LoadConfigFromEnv()
+	cfg := LoadConfigFromEnv() // лучше один раз грузить в main
 	var gid int64
 	switch ord.Category {
 	case "design":
@@ -256,7 +299,7 @@ func sendOrderToGroup(b *Bot, orderID int64, ord Order) {
 	txt := fmt.Sprintf("Новая анкета (id %d)\nКатегория: %s\nТекст: %s\nОт: %d", orderID, ord.Category, ord.Text, ord.CreatorID)
 	msg := tgbot.NewMessage(gid, txt)
 	msg.ReplyMarkup = orderButtonsInline(orderID)
-	b.Send(msg)
+	sendMessage(msg)
 }
 
 func orderButtonsInline(id int64) tgbot.InlineKeyboardMarkup {
